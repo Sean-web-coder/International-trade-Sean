@@ -8,3 +8,5 @@ services:
     envVars:
       - key: TRADESCOUT_ACCESS_TOKEN
         generateValue: true
+      - key: TRADESCOUT_CODEX_MODE
+        value: server

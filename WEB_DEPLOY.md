@@ -1,46 +1,49 @@
-# Render 网页版 + 本机 Codex
+# 网页直接使用 Codex 订阅
 
-这是私人单用户工作台。网页托管在 Render，Windows 连接器主动通过 HTTPS 领取任务，再调用本机已登录的 Codex。无需在电脑上开放端口，也无需上传 Codex 登录文件。网页支持找客户、背调评分、客户状态、邮件草稿和导出备份。
+默认部署模式现在是 **服务器 Codex CLI**。无需下载项目、安装 Windows 连接器或填写 API Key。你仍需亲自在 OpenAI 官方页面完成账号授权。
 
-## 1. 在 Render 创建网站（首次一次）
+## 已部署的 Render 网站如何更新
 
-1. 登录 https://dashboard.render.com/ ，选择 **New → Web Service**。
-2. 连接 GitHub 并选择 `Sean-web-coder/International-trade-Sean`。私有仓库需授权 Render 读取。
-3. **Branch 选 `tradescout-windows`**；Language / Runtime 选 **Docker**，Dockerfile 使用根目录 `Dockerfile`。
-4. Instance Type 选 **Free**。
-5. 添加环境变量 `TRADESCOUT_ACCESS_TOKEN`。用密码管理器生成至少 24 字符的随机密码，在 Render 中保存。它也是网页登录和连接器使用的连接码；不要发到聊天或写进 GitHub。
-6. 点击 **Deploy Web Service**。成功后打开 Render 显示的 `https://…onrender.com` 地址。这才是实际网页网址。
-7. 在网页输入连接码，进入工作台。
+1. Render 服务使用 GitHub 仓库 `Sean-web-coder/International-trade-Sean` 的 **tradescout-windows** 分支。
+2. 如果自动部署开启，GitHub 更新后等待部署变成 Live。否则在 Render 点击 **Manual Deploy → Deploy latest commit**。
+3. Docker 镜像已默认设置 `TRADESCOUT_CODEX_MODE=server`。若你以前手动配置了同名变量为 `local`，请改为 `server`。
+4. 打开网站，使用原来的工作台连接码登录，进入 **连接 Codex**。
+5. 点击 **登录我的 Codex**。出现设备码后，点击 **打开 OpenAI 官方授权页面**。
+6. 在 OpenAI 页面登录拥有 Codex 订阅额度的 ChatGPT 账号，输入刚刚生成的设备码并授权。若账号要求启用设备码登录，请按官方账号设置提示启用。
+7. 返回网站，等待显示“服务器 Codex 已登录”，然后点击 **测试 Codex 实际连接**。成功后即可找客户、背调和生成邮件。
 
-项目也带 `render.yaml`，可通过 Render 的 Blueprint 功能选择本分支部署；Blueprint 会自动生成连接码，可在服务的 Environment 中查看。**无需同时创建两种服务，任选一种。**
+设备码由你自己的 Render 服务器上的官方 `codex login --device-auth` 命令生成。不要授权别人发来的设备码。密码仅在 OpenAI 官方页面输入；不要向聊天、GitHub 或工作台输入 ChatGPT 密码、cookie 或 OAuth 令牌。
 
-免费服务可能休眠，首次打开需要等待唤醒。免费文件系统是临时的，重启/重新部署可能丢失 SQLite 客户和任务数据。网页提供 CSV 和包含草稿的完整 JSON 导出。JSON 是备份文件，当前没有界面导入功能。需要长期持久化时，在 Render 选择支持磁盘的付费方案，添加持久化磁盘并把 `TRADESCOUT_DATA_DIR` 指向挂载路径；在选择前查看 Render 当前费用。当前配置不会自动购买付费资源。
+## 账号、额度与数据
 
-## 2. Windows 接入 Codex
+- 网页调用部署在你服务器上的 Codex CLI，不是远程操控你 Windows 上的 Codex 窗口。
+- CLI 强制使用 ChatGPT 登录，并移除 API Key 环境变量，不自动切换到 API 计费。实际可用模型和额度受你的订阅、账号策略及 OpenAI 当前规则限制。
+- Codex 自行保存登录凭据在服务器的 `data/.codex`。后端不向网页返回 OAuth 凭据。退出网站只清除工作台会话；要撤销服务器登录，请点“退出 Codex 登录”。
+- 此版本是**私人单用户应用**。不要向其他人分享工作台连接码；持有该码的人可以访问客户资料、发起任务并使用你的 Codex 额度。
+- Render 免费文件系统是临时的：部署/重启可能清空客户资料和登录状态，需要重新授权。网页支持 CSV 和完整 JSON 导出；当前没有备份导入界面。长期保存可自行选择支持磁盘的付费方案，把 `TRADESCOUT_DATA_DIR` 指向持久化挂载目录。当前配置不会自动购买付费资源。
+- Codex 保留只读沙箱，不自动绕过安全限制。若 Render 不支持 Codex 所需的运行环境，或 OpenAI 不接受该服务器的登录/网络，网页会报告失败。这时需要选择兼容的私有服务器；单靠网页按钮无法消除平台限制。
 
-1. 电脑安装 Python 3.10+（推荐 3.12）、Node.js LTS。
-2. 终端执行 `npm install -g @openai/codex`，再执行 `codex login`。
-3. 从 GitHub 本分支 **Code → Download ZIP** 下载、解压。双击 **connect-codex.bat**。
-4. 按提示输入 Render 网站根地址（`https://…onrender.com`）及同一个连接码。连接码输入时不会显示。
-5. 保持窗口打开，在网页的“连接 Codex”页点击“测试 Codex 实际连接”。成功后即可搜索。
+## 首次部署到 Render
 
-连接器只需首次安装 Python 依赖。它不会接收任意命令，只执行搜索、背调、草稿和连接测试四种任务。模型调用使用本机 Codex 账户的服务与额度；电脑关机或关闭连接器后无法执行新任务。
+在 https://dashboard.render.com/ 选择 **New → Blueprint**，连接仓库，分支选 `tradescout-windows`，应用根目录的 `render.yaml`。配置使用免费实例并自动生成 `TRADESCOUT_ACCESS_TOKEN`。部署后在服务 Environment 中查看该值，用作工作台连接码，勿分享。
 
-可在本机 `.env` 配置 `TRADESCOUT_URL`、`TRADESCOUT_ACCESS_TOKEN` 和可选的 `CODEX_MODEL`，避免每次输入。这些内容只保存在本机，不要提交。
+也可手动 New → Web Service：选择上述仓库和分支、Docker runtime、Free 实例；设置至少 24 字符的随机 `TRADESCOUT_ACCESS_TOKEN`。使用 Render 实际给出的 `https://…onrender.com` 地址。
 
-## 验证与限制
+## 本地连接器兼容模式（可选）
 
-云端 12 项自动测试通过，并用真实 Chromium 验证了登录、背调任务返回、客户编辑、草稿保存、备份下载和手机布局。模型结果使用测试数据；不代表真实 Codex 已连通。Docker 构建在当前云环境中因容器无法解析依赖仓库/代理域名而受阻，Render 上的镜像构建尚待验证。实际 Windows Codex 连接需要在你的电脑测试；本云容器的 Codex 运行目录只读，不能完成真实模型调用。网页上“连接器在线”和“AI 连接成功”是不同状态。
+需要继续使用电脑上已登录的 Codex 时，将服务器变量 `TRADESCOUT_CODEX_MODE=local`。电脑双击 `connect-codex.bat`，输入网页地址和工作台连接码。默认服务器模式无需此操作。
 
-Render 部署必须由有权限的账号创建。本项目文件和部署配置本身不意味着网站已经上线。使用 Render 实际显示的域名，不要猜测网站地址。
+## 验证情况与开发
 
-开发启动：
+18 项自动测试已通过，包含登录设备码解析、只接受 ChatGPT 登录、子进程不继承 API Key、服务器任务循环、访问保护、任务租约/取消、客户入库与邮件校验。Chromium 浏览器验证了设备登录界面、授权后状态切换及原有业务流程；设备码与模型返回均使用测试数据。
+
+尚未替你完成真实 OpenAI 登录或订阅模型请求；必须由你本人授权后在部署的网站测试。当前云环境的 Docker 构建因容器 DNS 无法下载依赖而受阻，完整镜像构建需由 Render 验证。
 
 ```bash
 python -m pip install -r requirements.txt -r requirements-web.txt -r requirements-worker.txt pytest
-# 通过环境变量设置本地测试连接码，不要将真实值写进代码
-python -m uvicorn web_server:app --host 127.0.0.1 --port 8000
 python -m pytest -q
 ```
 
-本机测试连接器允许 `http://127.0.0.1:8000`；公网必须 HTTPS。生产运行使用一个 Uvicorn 进程和一个本机连接器。此版本用于一个拥有者，不支持多用户数据隔离。
+开发使用 `python -m uvicorn web_server:app --host 127.0.0.1 --port 8000`，通过环境变量配置工作台连接码。服务器 Codex 模式还需要安装官方 CLI 0.159.2、设置 `TRADESCOUT_CODEX_MODE=server`。只启动一个 Uvicorn 进程，避免多个登录管理器互相冲突。
+
+认证参考：官方 [Codex authentication](https://developers.openai.com/codex/auth) 和 [设备码登录实现](https://github.com/openai/codex/blob/main/codex-rs/login/src/device_code_auth.rs)。

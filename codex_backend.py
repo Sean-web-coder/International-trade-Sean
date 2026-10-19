@@ -8,6 +8,18 @@ import subprocess
 import tempfile
 
 
+def runtime_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    if env.get("TRADESCOUT_CODEX_MODE") == "server":
+        directory = Path(env.get("TRADESCOUT_DATA_DIR", str(Path(__file__).resolve().parent / "data")))
+        env["CODEX_HOME"] = str(directory / ".codex")
+        # Server jobs must use the user's ChatGPT login, never an API fallback
+        # or the web application's access code.
+        for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "TRADESCOUT_ACCESS_TOKEN"):
+            env.pop(key, None)
+    return env
+
+
 def command_prefix() -> list[str]:
     executable = shutil.which(os.getenv("CODEX_BIN", "codex"))
     if not executable:
@@ -40,7 +52,7 @@ def invoke_codex(instructions: str, task: str, model: str = "", use_search: bool
     timeout = int(os.getenv("CODEX_TIMEOUT_SECONDS", "240"))
     with tempfile.TemporaryDirectory(prefix="tradescout-") as directory:
         output = Path(directory) / "response.txt"
-        command = prefix + [
+        command = prefix + (["-c", 'cli_auth_credentials_store="file"', "-c", 'forced_login_method="chatgpt"'] if os.getenv("TRADESCOUT_CODEX_MODE") == "server" else []) + [
             "-a", "never", "-c", 'web_search="live"' if use_search else 'web_search="disabled"',
             "-c", "features.shell_tool=false",
             "exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only",
@@ -52,13 +64,15 @@ def invoke_codex(instructions: str, task: str, model: str = "", use_search: bool
         prompt = instructions + "\nDo not run commands, read local files, or use MCP integrations. Use only web search when research is requested. Return only the requested JSON.\n\nTask data:\n" + task
         try:
             result = subprocess.run(command, input=prompt, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace", timeout=timeout)
+                                    encoding="utf-8", errors="replace", timeout=timeout, env=runtime_environment())
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"Codex 请求超过 {timeout} 秒。请缩小查询范围后重试。") from exc
         except OSError as exc:
             raise RuntimeError("Codex 进程启动失败，请检查本机安装。") from exc
         if result.returncode:
             # Do not expose CLI diagnostics: they may contain account/config data.
+            if os.getenv("TRADESCOUT_CODEX_MODE") == "server":
+                raise RuntimeError("服务器 Codex 调用失败。请重新登录并检查订阅额度、模型权限、OpenAI 网络访问及服务器沙箱兼容性。")
             raise RuntimeError(f"Codex 调用失败（退出码 {result.returncode}）。请在本机终端运行 codex，检查登录、额度、网络和模型权限；Windows 如遇沙箱问题可使用 WSL。")
         if not output.is_file() or not output.read_text(encoding="utf-8").strip():
             raise RuntimeError("Codex 未返回结果，请检查模型权限或稍后重试。")

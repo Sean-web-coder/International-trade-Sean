@@ -1,6 +1,6 @@
 # TradeScout · 网页版与本机 Codex
 
-**推荐使用网页版：** [Render 部署与 Codex 连接指南](WEB_DEPLOY.md)。网站部署完成后，通过浏览器使用，Windows 双击 `connect-codex.bat` 连接 Codex。
+**推荐使用网页版：** [Render 部署与 Codex 连接指南](WEB_DEPLOY.md)。网站部署完成后，在“连接 Codex”中点击“登录我的 Codex”，在 OpenAI 官方页面完成设备码授权。默认无需下载或启动本机连接器，使用登录账号的 Codex 订阅权限和额度。
 
 以下为原有本地 Streamlit 版说明。
 

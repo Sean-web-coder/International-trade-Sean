@@ -7,6 +7,8 @@ from pathlib import Path
 import secrets
 import sqlite3
 import time
+import threading
+from contextlib import asynccontextmanager
 from contextlib import closing
 from typing import Literal
 
@@ -16,7 +18,22 @@ from pydantic import BaseModel, Field
 import storage
 from engine import normalize_url, score_prospect, qualify_score, validate_draft
 
-app = FastAPI(title="TradeScout Web", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(app):
+    from server_codex import server_mode, prepare_home, login
+    stop = threading.Event()
+    thread = None
+    if server_mode():
+        prepare_home()
+        thread = threading.Thread(target=server_job_loop, args=(stop,), daemon=True)
+        thread.start()
+    yield
+    stop.set()
+    if server_mode():
+        login.stop_login()
+
+
+app = FastAPI(title="TradeScout Web", docs_url=None, redoc_url=None, lifespan=lifespan)
 ROOT = Path(__file__).resolve().parent
 
 
@@ -53,9 +70,13 @@ def health():
 
 @app.get("/api/status", dependencies=[Depends(authorize)])
 def status():
+    from server_codex import server_mode, login
+    if server_mode():
+        auth = login.snapshot()
+        return {"mode": "server", "worker_online": auth["authenticated"], "codex": auth}
     with closing(db()) as conn:
         row = conn.execute('SELECT seen FROM worker_status WHERE id=1').fetchone()
-    return {"worker_online": bool(row and time.time() - row[0] < 30)}
+    return {"mode": "local", "worker_online": bool(row and time.time() - row[0] < 30)}
 
 
 class JobRequest(BaseModel):
@@ -210,3 +231,55 @@ def save_draft(pid: int, value: Draft):
 def drafts(pid: int):
     with closing(db()) as conn:
         return storage.list_drafts(conn, pid)
+
+
+@app.post('/api/codex/login', dependencies=[Depends(authorize)])
+def start_codex_login():
+    from server_codex import server_mode, login
+    if not server_mode():
+        raise HTTPException(409, '当前部署未启用服务器 Codex')
+    return login.start()
+
+
+@app.post('/api/codex/logout', dependencies=[Depends(authorize)])
+def logout_codex():
+    from server_codex import server_mode, login
+    if not server_mode():
+        raise HTTPException(409, '当前部署未启用服务器 Codex')
+    # Do not revoke credentials while a model job is still running.
+    with closing(db()) as conn:
+        if conn.execute("SELECT 1 FROM jobs WHERE state='running' LIMIT 1").fetchone():
+            raise HTTPException(409, '请等待当前任务结束后再退出 Codex')
+    try:
+        return login.logout()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+def server_job_loop(stop):
+    from server_codex import login
+    from tasks import execute
+    while not stop.is_set():
+        if not login.authenticated():
+            stop.wait(3)
+            continue
+        try:
+            job = claim()['job']
+            if not job:
+                stop.wait(2)
+                continue
+            try:
+                result = execute(job, os.getenv('CODEX_MODEL', ''))
+                value = Completion(lease_token=job['lease_token'], result=result)
+            except Exception:
+                value = Completion(lease_token=job['lease_token'], error='服务器 Codex 执行失败。请检查登录、订阅额度、模型权限或网络后重试。')
+            try:
+                complete(job['id'], value)
+            except HTTPException as exc:
+                if exc.status_code == 422:
+                    complete(job['id'], Completion(lease_token=job['lease_token'], error='Codex 返回格式不正确，请重试。'))
+                elif exc.status_code != 409:
+                    raise
+        except Exception:
+            # Never print model prompts, tokens or CLI output to server logs.
+            stop.wait(3)

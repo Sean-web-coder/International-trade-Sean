@@ -2,7 +2,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 import web_server
-import worker
+import tasks as worker
 
 
 @pytest.fixture
