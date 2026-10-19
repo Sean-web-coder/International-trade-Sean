@@ -17,4 +17,3 @@ def execute(job, model):
             raise RuntimeError('模型响应格式异常')
         return result
     raise ValueError('未知任务类型')
-
