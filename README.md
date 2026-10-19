@@ -1,3 +1,9 @@
+# TradeScout · 网页版与本机 Codex
+
+**推荐使用网页版：** [Render 部署与 Codex 连接指南](WEB_DEPLOY.md)。网站部署完成后，通过浏览器使用，Windows 双击 `connect-codex.bat` 连接 Codex。
+
+以下为原有本地 Streamlit 版说明。
+
 # TradeScout · Windows 本机 Codex 外贸智能体
 
 通过本机 Codex CLI 搜索海外采购商、背调官网、按公开证据评分、保存客户和生成英文邮件草稿。默认无需填写 OpenAI API Key；复用运行本应用的电脑上 Codex CLI 的登录状态。模型仍通过网络运行，受该账户的权限和使用额度限制。

@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: tradescout-web
+    runtime: docker
+    plan: free
+    branch: tradescout-windows
+    healthCheckPath: /health
+    envVars:
+      - key: TRADESCOUT_ACCESS_TOKEN
+        generateValue: true
