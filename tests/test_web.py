@@ -73,3 +73,43 @@ def test_invalid_tasks_and_failed_codex(client):
     job = client.post('/api/worker/claim').json()['job']
     assert client.post(f'/api/worker/{jid}/complete', json={'lease_token': job['lease_token'], 'error': 'Codex offline'}).status_code == 200
     assert client.get(f'/api/jobs/{jid}').json()['error'] == 'Codex offline'
+
+
+def test_csv_domain_dedup_and_backup_restore(client):
+    csv_data = '公司,国家,官网\nBuyer A,United Arab Emirates,https://www.example.com/catalog\nDuplicate,Saudi Arabia,example.com\nBuyer B,South Africa,https://buyer.test/\nInvalid,Saudi Arabia,not-a-domain\n'
+    imported = client.post('/api/prospects/import', content=csv_data, headers={'Content-Type': 'text/plain'})
+    assert imported.status_code == 200
+    assert imported.json() == {'created': 2, 'duplicates': 1, 'invalid': [5]}
+    leads = client.get('/api/prospects').json()
+    assert len(leads) == 2
+    assert {x['canonical_domain'] for x in leads} == {'example.com', 'buyer.test'}
+    first = next(x for x in leads if x['canonical_domain'] == 'example.com')
+    assert first['score'] == 0
+    assert client.post(f"/api/prospects/{first['id']}/drafts", json={'stage': 0, 'subject': 'Hello', 'body': 'Hello buyer'}).status_code == 200
+    backup = client.get('/api/backup').json()
+    assert backup['schema_version'] == 1
+    assert len(backup['prospects']) == 2
+    assert sum(len(x['drafts']) for x in backup['prospects']) == 1
+    assert client.post('/api/backup/restore', json=backup).json() == {'created': 0, 'duplicates': 2, 'drafts': 0, 'invalid': 0}
+
+
+def test_restore_into_new_database_and_legacy_domain_migration(client, tmp_path, monkeypatch):
+    import sqlite3
+    import storage
+    conn = sqlite3.connect(tmp_path / 'old.sqlite3')
+    conn.execute('CREATE TABLE prospects (id INTEGER PRIMARY KEY,website TEXT UNIQUE,name TEXT,country TEXT,score INTEGER,status TEXT,email TEXT,contact_name TEXT,research_json TEXT,created_at TEXT,updated_at TEXT)')
+    conn.execute('CREATE TABLE drafts (id INTEGER PRIMARY KEY,prospect_id INTEGER,stage INTEGER,subject TEXT,body TEXT,created_at TEXT)')
+    for pid, url in ((1, 'https://example.com'), (2, 'https://www.example.com/products')):
+        conn.execute('INSERT INTO prospects VALUES (?,?,?,?,?,?,?,?,?,?,?)', (pid,url,'Buyer','UAE',0,'未联系','','','{}','now','now'))
+    conn.execute('INSERT INTO drafts VALUES (1,2,0,?,?,?)', ('Hello','Hello buyer','now'))
+    conn.commit()
+    conn.close()
+    migrated = storage.connect(tmp_path / 'old.sqlite3')
+    assert len(storage.list_prospects(migrated)) == 1
+    assert len(storage.list_drafts(migrated, 1)) == 1
+    migrated.close()
+    backup = client.get('/api/backup').json()
+    monkeypatch.setenv('TRADESCOUT_DATA_DIR', str(tmp_path / 'new'))
+    result = client.post('/api/backup/restore', json=backup).json()
+    assert result['created'] == len(backup['prospects'])
+    assert len(client.get('/api/prospects').json()) == len(backup['prospects'])

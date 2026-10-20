@@ -1,6 +1,8 @@
 """Single-owner hosted web app. Local Codex workers poll authenticated jobs."""
 from __future__ import annotations
 import hmac
+import csv
+import io
 import json
 import os
 from pathlib import Path
@@ -12,7 +14,7 @@ from contextlib import asynccontextmanager
 from contextlib import closing
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import storage
@@ -39,7 +41,7 @@ ROOT = Path(__file__).resolve().parent
 
 def db():
     directory = Path(os.getenv("TRADESCOUT_DATA_DIR", str(ROOT / "data")))
-    conn = storage.connect(directory / "leads.sqlite3")
+    conn = storage.connect(None if os.getenv('DATABASE_URL') else directory / 'leads.sqlite3')
     conn.execute('''CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL,
         state TEXT NOT NULL, result TEXT, error TEXT, created REAL NOT NULL,
@@ -73,10 +75,12 @@ def status():
     from server_codex import server_mode, login
     if server_mode():
         auth = login.snapshot()
-        return {"mode": "server", "worker_online": auth["authenticated"], "codex": auth}
+        return {"mode": "server", "worker_online": auth["authenticated"], "codex": auth,
+                "storage": "postgres" if os.getenv('DATABASE_URL') else "temporary"}
     with closing(db()) as conn:
         row = conn.execute('SELECT seen FROM worker_status WHERE id=1').fetchone()
-    return {"mode": "local", "worker_online": bool(row and time.time() - row[0] < 30)}
+    return {"mode": "local", "worker_online": bool(row and time.time() - row[0] < 30),
+            "storage": "postgres" if os.getenv('DATABASE_URL') else "temporary"}
 
 
 class JobRequest(BaseModel):
@@ -135,9 +139,10 @@ def claim():
     now = time.time()
     with closing(db()) as conn:
         conn.execute('BEGIN IMMEDIATE')
-        conn.execute('INSERT OR REPLACE INTO worker_status (id,seen) VALUES (1,?)', (now,))
+        conn.execute('INSERT INTO worker_status (id,seen) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET seen=excluded.seen', (now,))
         conn.execute("UPDATE jobs SET state='error',error='任务等待超过一小时，请重新提交' WHERE state='queued' AND created<?", (now-3600,))
-        row = conn.execute("SELECT * FROM jobs WHERE state='queued' OR (state='running' AND leased<?) ORDER BY created LIMIT 1", (now-600,)).fetchone()
+        lock = ' FOR UPDATE SKIP LOCKED' if os.getenv('DATABASE_URL') else ''
+        row = conn.execute("SELECT * FROM jobs WHERE state='queued' OR (state='running' AND leased<?) ORDER BY created LIMIT 1" + lock, (now-600,)).fetchone()
         if not row:
             conn.commit()
             return {'job': None}
@@ -150,7 +155,7 @@ def claim():
 @app.post('/api/worker/heartbeat', dependencies=[Depends(authorize)])
 def heartbeat():
     with closing(db()) as conn:
-        conn.execute('INSERT OR REPLACE INTO worker_status (id,seen) VALUES (1,?)', (time.time(),))
+        conn.execute('INSERT INTO worker_status (id,seen) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET seen=excluded.seen', (time.time(),))
         conn.commit()
     return {'ok': True}
 
@@ -165,7 +170,8 @@ class Completion(BaseModel):
 def complete(jid: str, value: Completion):
     with closing(db()) as conn:
         conn.execute('BEGIN IMMEDIATE')
-        row = conn.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone()
+        lock = ' FOR UPDATE' if os.getenv('DATABASE_URL') else ''
+        row = conn.execute('SELECT * FROM jobs WHERE id=?' + lock, (jid,)).fetchone()
         if not row or row['state'] != 'running' or row['lease_token'] != value.lease_token:
             raise HTTPException(409, '任务已结束或已重新分配')
         result = value.result
@@ -192,6 +198,90 @@ def complete(jid: str, value: Completion):
 def prospects():
     with closing(db()) as conn:
         return storage.list_prospects(conn)
+
+
+@app.post('/api/prospects/import', dependencies=[Depends(authorize)])
+def import_prospects(content: str = Body(media_type='text/plain')):
+    if len(content.encode('utf-8')) > 1_000_000:
+        raise HTTPException(413, 'CSV 不得超过 1 MB')
+    try:
+        rows = list(csv.DictReader(io.StringIO(content.lstrip('\ufeff'))))
+    except csv.Error as exc:
+        raise HTTPException(400, 'CSV 格式错误') from exc
+    if not rows or len(rows) > 500:
+        raise HTTPException(400, '每次请导入 1–500 行客户')
+    result = {'created': 0, 'duplicates': 0, 'invalid': []}
+    with closing(db()) as conn:
+        for index, row in enumerate(rows, 2):
+            website = next((row.get(k, '').strip() for k in ('website', 'url', '官网', '网站') if row.get(k)), '')
+            name = next((row.get(k, '').strip() for k in ('name', 'company', '公司', '公司名称') if row.get(k)), '')
+            country = next((row.get(k, '').strip() for k in ('country', '国家') if row.get(k)), '')
+            try:
+                domain = storage.canonical_domain(website)
+            except ValueError:
+                result['invalid'].append(index)
+                continue
+            if conn.execute('SELECT 1 FROM prospects WHERE canonical_domain=?', (domain,)).fetchone():
+                result['duplicates'] += 1
+                continue
+            storage.upsert_prospect(conn, {'website': website, 'name': name or domain, 'country': country,
+                                           'import_source': 'CSV', 'evidence': {}}, commit=False)
+            result['created'] += 1
+        conn.commit()
+    return result
+
+
+@app.get('/api/backup', dependencies=[Depends(authorize)])
+def backup():
+    with closing(db()) as conn:
+        prospects = storage.list_prospects(conn)
+        for record in prospects:
+            record['drafts'] = storage.list_drafts(conn, record['id'])
+    return {'schema_version': 1, 'exported_at': time.time(), 'prospects': prospects}
+
+
+@app.post('/api/backup/restore', dependencies=[Depends(authorize)])
+def restore_backup(payload: dict):
+    if payload.get('schema_version') not in (None, 1) or not isinstance(payload.get('prospects'), list):
+        raise HTTPException(400, '备份格式不正确')
+    rows = payload['prospects']
+    if len(rows) > 10000:
+        raise HTTPException(413, '备份记录过多')
+    result = {'created': 0, 'duplicates': 0, 'drafts': 0, 'invalid': 0}
+    with closing(db()) as conn:
+        for row in rows:
+            if not isinstance(row, dict):
+                result['invalid'] += 1
+                continue
+            try:
+                domain = storage.canonical_domain(row.get('website', ''))
+            except ValueError:
+                result['invalid'] += 1
+                continue
+            existing = conn.execute('SELECT id FROM prospects WHERE canonical_domain=?', (domain,)).fetchone()
+            if existing:
+                pid = existing['id']
+                result['duplicates'] += 1
+            else:
+                data = json.loads(row.get('research_json') or '{}')
+                if not isinstance(data, dict):
+                    data = {}
+                data.update({'website': row['website'], 'company_name': row.get('name') or domain,
+                             'country': row.get('country') or '', 'score': row.get('score') or 0})
+                pid = storage.upsert_prospect(conn, data, commit=False)
+                conn.execute('UPDATE prospects SET status=?,email=?,contact_name=? WHERE id=?',
+                             (row.get('status') or '未联系', row.get('email') or '', row.get('contact_name') or '', pid))
+                result['created'] += 1
+            for draft in row.get('drafts', []):
+                if not isinstance(draft, dict) or not {'subject', 'body', 'stage'} <= draft.keys():
+                    continue
+                found = conn.execute('SELECT 1 FROM drafts WHERE prospect_id=? AND stage=? AND subject=? AND body=?',
+                                     (pid, draft['stage'], draft['subject'], draft['body'])).fetchone()
+                if not found:
+                    storage.save_draft(conn, pid, int(draft['stage']), draft, commit=False)
+                    result['drafts'] += 1
+        conn.commit()
+    return result
 
 
 class Details(BaseModel):

@@ -1,5 +1,13 @@
 # 网页直接使用 Codex 订阅
 
+## 第一阶段：客户资料持久化
+
+新版本支持在 Render 环境变量中设置 `DATABASE_URL`，连接用户自己的托管 PostgreSQL。未设置时仍使用容器内 SQLite，工作台会提示数据可能丢失。网站的客户库增加 CSV 导入、完整 JSON 备份和 JSON 恢复；同一公司 `example.com`、`www.example.com` 或不同官网路径按域名合并，已保存的草稿保留。CSV 接受 `官网/website/url`、`公司/name/company`、`国家/country` 三列，单次最多 500 行；无效网址会报告行号。
+
+迁移顺序：先在**当前网站**下载完整 JSON 备份并保存到自己的电脑；在 Render 建立 PostgreSQL 后，把其内部连接字符串仅填入服务环境变量 `DATABASE_URL`，不要放进 GitHub、聊天或网页输入框；部署新版本后，确认工作台显示“已连接托管 PostgreSQL”，再使用“恢复备份”导入刚下载的文件，核对客户数、草稿数，并重新下载一次备份验证。原始 SQLite 数据不会自行移动到 PostgreSQL。任何部署都可能清除旧免费实例的本地文件，所以必须先下载旧网站备份。
+
+若希望 Codex CLI 的登录状态也在重新部署后保留，需要给 Web 服务另配持久磁盘，并把 `TRADESCOUT_DATA_DIR` 指向挂载目录；数据库只保存业务资料，不保存 Codex 登录凭据。持续运行的网页实例与定时任务属于后续阶段。Render 当前套餐价格在本云环境未能读取，选择具体付费资源前应以 Render 控制台实时价格为准。本项目不会自动购买服务。
+
 默认部署模式现在是 **服务器 Codex CLI**。无需下载项目、安装 Windows 连接器或填写 API Key。你仍需亲自在 OpenAI 官方页面完成账号授权。
 
 ## 已部署的 Render 网站如何更新
