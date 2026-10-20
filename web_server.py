@@ -107,7 +107,7 @@ def create_job(request: JobRequest):
             record = storage.get_prospect(conn, request.prospect_id or 0)
             if not record:
                 raise HTTPException(404, '请先选择已背调客户')
-            payload['prospect'] = json.loads(record['research_json'])
+            payload['prospect'] = storage.approved_research(conn, record['id'])
         if conn.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0] >= 20:
             raise HTTPException(429, '待处理任务过多，请等待或取消旧任务')
         jid = secrets.token_hex(16)
@@ -179,8 +179,9 @@ def complete(jid: str, value: Completion):
             if row['kind'] == 'research':
                 if not isinstance(result, dict) or not isinstance(result.get('evidence'), dict):
                     raise HTTPException(422, '背调结果格式错误')
-                result['score'], result['score_parts'] = score_prospect(result['evidence'])
-                result['priority'] = qualify_score(result['score'])
+                result['score'] = 0
+                result['score_parts'] = {key: 0 for key in score_prospect(result['evidence'])[1]}
+                result['priority'] = qualify_score(0)
                 result['input_website'] = json.loads(row['payload'])['website']
                 storage.upsert_prospect(conn, result)
             elif row['kind'] == 'draft':
@@ -237,6 +238,8 @@ def backup():
         prospects = storage.list_prospects(conn)
         for record in prospects:
             record['drafts'] = storage.list_drafts(conn, record['id'])
+            record['evidence_reviews'] = [dict(r) for r in conn.execute(
+                'SELECT * FROM evidence_reviews WHERE prospect_id=?', (record['id'],)).fetchall()]
     return {'schema_version': 1, 'exported_at': time.time(), 'prospects': prospects}
 
 
@@ -266,8 +269,9 @@ def restore_backup(payload: dict):
                 data = json.loads(row.get('research_json') or '{}')
                 if not isinstance(data, dict):
                     data = {}
-                data.update({'website': row['website'], 'company_name': row.get('name') or domain,
-                             'country': row.get('country') or '', 'score': row.get('score') or 0})
+                data.update({'website': row['website'], 'input_website': row['website'],
+                             'company_name': row.get('name') or domain,
+                             'country': row.get('country') or '', 'score': 0})
                 pid = storage.upsert_prospect(conn, data, commit=False)
                 conn.execute('UPDATE prospects SET status=?,email=?,contact_name=? WHERE id=?',
                              (row.get('status') or '未联系', row.get('email') or '', row.get('contact_name') or '', pid))
@@ -280,6 +284,16 @@ def restore_backup(payload: dict):
                 if not found:
                     storage.save_draft(conn, pid, int(draft['stage']), draft, commit=False)
                     result['drafts'] += 1
+            for review in row.get('evidence_reviews', []):
+                if not isinstance(review, dict) or review.get('criterion') not in storage.SCORING:
+                    continue
+                if review.get('decision') not in {'approved', 'rejected', 'pending'}:
+                    continue
+                conn.execute('''INSERT INTO evidence_reviews (prospect_id,criterion,decision,source_url,reviewed_at)
+                                VALUES (?,?,?,?,?) ON CONFLICT(prospect_id,criterion) DO NOTHING''',
+                             (pid, review['criterion'], review['decision'], review.get('source_url') or '',
+                              review.get('reviewed_at') or ''))
+            storage.recompute_score(conn, pid, commit=False)
         conn.commit()
     return result
 
@@ -297,6 +311,31 @@ def details(pid: int, value: Details):
             raise HTTPException(404, '客户不存在')
         storage.update_details(conn, pid, value.status, value.email, value.contact_name)
     return {'ok': True}
+
+
+@app.get('/api/prospects/{pid}/evidence', dependencies=[Depends(authorize)])
+def evidence(pid: int):
+    with closing(db()) as conn:
+        result = storage.evidence_state(conn, pid)
+    if result is None:
+        raise HTTPException(404, '客户不存在')
+    return result
+
+
+class EvidenceReview(BaseModel):
+    criterion: str
+    decision: Literal['approved', 'rejected', 'pending']
+    source_url: str = Field(default='', max_length=2000)
+
+
+@app.post('/api/prospects/{pid}/evidence', dependencies=[Depends(authorize)])
+def save_evidence_review(pid: int, value: EvidenceReview):
+    with closing(db()) as conn:
+        try:
+            score = storage.review_evidence(conn, pid, value.criterion, value.decision, value.source_url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return {'score': score}
 
 
 class Draft(BaseModel):

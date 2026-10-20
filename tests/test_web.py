@@ -37,12 +37,17 @@ def test_research_roundtrip_and_draft(client, monkeypatch):
     assert client.post(f'/api/worker/{jid}/complete', json=done).status_code == 409
     assert client.get(f'/api/jobs/{jid}').json()['state'] == 'done'
     leads = client.get('/api/prospects').json()
-    assert len(leads) == 1 and leads[0]['score'] == 20
+    assert len(leads) == 1 and leads[0]['score'] == 0
     pid = leads[0]['id']
+    pending = client.get(f'/api/prospects/{pid}/evidence').json()
+    assert pending['evidence']['multi_category']['decision'] == 'pending'
+    assert client.post(f'/api/prospects/{pid}/evidence', json={'criterion': 'multi_category', 'decision': 'approved'}).status_code == 400
+    assert client.post(f'/api/prospects/{pid}/evidence', json={'criterion': 'multi_category', 'decision': 'approved', 'source_url': 'https://example.com'}).json()['score'] == 20
     assert client.patch(f'/api/prospects/{pid}', json={'status': '已回复', 'email': 'buyer@example.com'}).status_code == 200
     jid = client.post('/api/jobs', json={'kind': 'draft', 'prospect_id': pid}).json()['id']
     job = client.post('/api/worker/claim').json()['job']
     assert job['payload']['prospect']['company_name'] == 'Example Buyer'
+    assert job['payload']['prospect']['evidence']['multi_category']['confirmed'] is True
     draft = {'subject': 'Mixed orders', 'body': 'Do you consolidate sourcing? Sean'}
     monkeypatch.setattr(worker, 'draft_email', lambda *a, **kw: draft)
     assert client.post(f'/api/worker/{jid}/complete', json={'lease_token': job['lease_token'], 'result': worker.execute(job, '')}).status_code == 200
@@ -113,3 +118,26 @@ def test_restore_into_new_database_and_legacy_domain_migration(client, tmp_path,
     result = client.post('/api/backup/restore', json=backup).json()
     assert result['created'] == len(backup['prospects'])
     assert len(client.get('/api/prospects').json()) == len(backup['prospects'])
+
+
+def test_evidence_approval_controls_score_and_email_facts(client):
+    import storage
+    with web_server.db() as conn:
+        pid = storage.upsert_prospect(conn, {'input_website': 'https://example.org', 'company_name': 'Buyer',
+            'score': 0, 'evidence': {'china_import': {'confirmed': True, 'explanation': 'Claims China sourcing',
+                                                     'sources': ['https://example.org/about']}}})
+    draft_job = client.post('/api/jobs', json={'kind': 'draft', 'prospect_id': pid}).json()['id']
+    with web_server.db() as conn:
+        job = conn.execute('SELECT payload FROM jobs WHERE id=?', (draft_job,)).fetchone()
+    import json
+    assert json.loads(job['payload'])['prospect']['evidence']['china_import']['confirmed'] is False
+    assert client.post(f'/api/prospects/{pid}/evidence', json={'criterion': 'china_import', 'decision': 'rejected'}).json()['score'] == 0
+    assert client.post(f'/api/prospects/{pid}/evidence', json={'criterion': 'china_import', 'decision': 'approved', 'source_url': 'javascript:alert(1)'}).status_code == 400
+    assert client.post(f'/api/prospects/{pid}/evidence', json={'criterion': 'china_import', 'decision': 'approved', 'source_url': 'https://example.org/about'}).json()['score'] == 25
+    backup = client.get('/api/backup').json()
+    assert len(backup['prospects'][0]['evidence_reviews']) == 1
+    with web_server.db() as conn:
+        assert storage.approved_research(conn, pid)['evidence']['china_import']['confirmed'] is True
+        storage.upsert_prospect(conn, {'input_website': 'https://www.example.org/updated', 'company_name': 'Buyer',
+            'score': 0, 'evidence': {'china_import': {'confirmed': False, 'explanation': 'Needs review', 'sources': []}}})
+        assert storage.evidence_state(conn, pid)['evidence']['china_import']['decision'] == 'pending'

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from database import PostgresConnection, hosted_url
+from engine import SCORING, qualify_score
 
 DB_PATH = Path(__file__).resolve().parent / "data" / "leads.sqlite3"
 
@@ -44,6 +45,17 @@ def connect(path: str | Path | None = None):
         created_at TEXT NOT NULL,
         FOREIGN KEY(prospect_id) REFERENCES prospects(id)
     )""")
+    had_reviews = bool(conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name='evidence_reviews'" if url else
+                                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='evidence_reviews'").fetchone())
+    conn.execute("""CREATE TABLE IF NOT EXISTS evidence_reviews (
+        prospect_id INTEGER NOT NULL,
+        criterion TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        source_url TEXT NOT NULL DEFAULT '',
+        reviewed_at TEXT NOT NULL,
+        PRIMARY KEY(prospect_id,criterion),
+        FOREIGN KEY(prospect_id) REFERENCES prospects(id)
+    )""")
     columns = {row['name'] if isinstance(row, sqlite3.Row) else row['column_name'] for row in
                (conn.execute('PRAGMA table_info(prospects)').fetchall() if not url else
                 conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='prospects'").fetchall())}
@@ -58,12 +70,21 @@ def connect(path: str | Path | None = None):
             continue
         if domain in domains:
             conn.execute('UPDATE drafts SET prospect_id=? WHERE prospect_id=?', (domains[domain], row['id']))
+            conn.execute('DELETE FROM evidence_reviews WHERE prospect_id=?', (row['id'],))
             conn.execute('DELETE FROM prospects WHERE id=?', (row['id'],))
         else:
             domains[domain] = row['id']
             if row['canonical_domain'] != domain:
                 conn.execute('UPDATE prospects SET canonical_domain=? WHERE id=?', (domain, row['id']))
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS prospects_domain_unique ON prospects(canonical_domain)')
+    if not had_reviews:
+        for row in conn.execute('SELECT id,research_json FROM prospects').fetchall():
+            research = json.loads(row['research_json'] or '{}')
+            research['score'] = 0
+            research['score_parts'] = {key: 0 for key in SCORING}
+            research['priority'] = qualify_score(0)
+            conn.execute('UPDATE prospects SET score=0,research_json=? WHERE id=?',
+                         (json.dumps(research, ensure_ascii=False), row['id']))
     conn.commit()
     return conn
 
@@ -87,6 +108,8 @@ def upsert_prospect(conn: sqlite3.Connection, data: dict[str, Any], *, commit: b
     existing = conn.execute('SELECT id FROM prospects WHERE canonical_domain=? OR website=?', (domain, website)).fetchone()
     if existing:
         pid = existing['id']
+        if isinstance(data.get('evidence'), dict) and data['evidence']:
+            conn.execute('DELETE FROM evidence_reviews WHERE prospect_id=?', (pid,))
         conn.execute('''UPDATE prospects SET name=?,country=?,score=?,research_json=?,updated_at=?,canonical_domain=? WHERE id=?''',
                      (name, str(data.get('country') or ''), int(data.get('score') or 0),
                       json.dumps(data, ensure_ascii=False), now, domain, pid))
@@ -125,3 +148,78 @@ def save_draft(conn: sqlite3.Connection, pid: int, stage: int, draft: dict[str, 
 
 def list_drafts(conn: sqlite3.Connection, pid: int) -> list[dict[str, Any]]:
     return [dict(r) for r in conn.execute("SELECT * FROM drafts WHERE prospect_id=? ORDER BY created_at DESC", (pid,))]
+
+
+def evidence_state(conn, pid: int) -> dict[str, Any] | None:
+    record = get_prospect(conn, pid)
+    if not record:
+        return None
+    research = json.loads(record['research_json'] or '{}')
+    reviews = {row['criterion']: dict(row) for row in conn.execute(
+        'SELECT * FROM evidence_reviews WHERE prospect_id=?', (pid,)).fetchall()}
+    evidence = {}
+    for key in SCORING:
+        item = research.get('evidence', {}).get(key, {})
+        review = reviews.get(key, {})
+        evidence[key] = {'proposal': item, 'decision': review.get('decision', 'pending'),
+                         'source_url': review.get('source_url', ''), 'reviewed_at': review.get('reviewed_at')}
+    return {'evidence': evidence, 'score': record['score']}
+
+
+def review_evidence(conn, pid: int, criterion: str, decision: str, source_url: str = '') -> int:
+    if criterion not in SCORING or decision not in {'approved', 'rejected', 'pending'}:
+        raise ValueError('证据审批输入不正确')
+    record = get_prospect(conn, pid)
+    if not record:
+        raise ValueError('客户不存在')
+    research = json.loads(record['research_json'] or '{}')
+    proposal = research.get('evidence', {}).get(criterion, {})
+    if decision == 'approved':
+        parsed = urlparse(source_url)
+        if not isinstance(proposal, dict) or not str(proposal.get('explanation') or '').strip() or parsed.scheme not in {'https', 'http'} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError('通过证据前，请确认描述和公开来源网址')
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute('''INSERT INTO evidence_reviews (prospect_id,criterion,decision,source_url,reviewed_at)
+                    VALUES (?,?,?,?,?) ON CONFLICT(prospect_id,criterion) DO UPDATE SET
+                    decision=excluded.decision,source_url=excluded.source_url,reviewed_at=excluded.reviewed_at''',
+                 (pid, criterion, decision, source_url if decision == 'approved' else '', now))
+    score = recompute_score(conn, pid, commit=False)
+    conn.commit()
+    return score
+
+
+def recompute_score(conn, pid: int, *, commit: bool = True) -> int:
+    record = get_prospect(conn, pid)
+    research = json.loads(record['research_json'] or '{}')
+    rows = conn.execute('SELECT criterion,decision,source_url FROM evidence_reviews WHERE prospect_id=?', (pid,)).fetchall()
+    approved = set()
+    for row in rows:
+        item = research.get('evidence', {}).get(row['criterion'], {})
+        parsed = urlparse(row['source_url'])
+        if row['decision'] == 'approved' and isinstance(item, dict) and item.get('explanation') and parsed.scheme in {'http', 'https'} and parsed.hostname and not parsed.username and not parsed.password:
+            approved.add(row['criterion'])
+    score = sum(points for key, (points, _) in SCORING.items() if key in approved)
+    research['score'] = score
+    research['score_parts'] = {key: points if key in approved else 0 for key, (points, _) in SCORING.items()}
+    research['priority'] = qualify_score(score)
+    conn.execute('UPDATE prospects SET score=?,research_json=?,updated_at=? WHERE id=?',
+                 (score, json.dumps(research, ensure_ascii=False), datetime.now(timezone.utc).isoformat(), pid))
+    if commit:
+        conn.commit()
+    return score
+
+
+def approved_research(conn, pid: int) -> dict[str, Any]:
+    record = get_prospect(conn, pid)
+    research = json.loads(record['research_json'] or '{}')
+    reviews = {r['criterion']: r for r in conn.execute(
+        "SELECT criterion,source_url FROM evidence_reviews WHERE prospect_id=? AND decision='approved'", (pid,)).fetchall()}
+    evidence = {}
+    for key, item in research.get('evidence', {}).items():
+        if not isinstance(item, dict):
+            continue
+        valid = key in reviews and bool(research.get('score_parts', {}).get(key))
+        evidence[key] = {**item, 'confirmed': valid,
+                         'sources': [reviews[key]['source_url']] if valid else []}
+    research['evidence'] = evidence
+    return research
