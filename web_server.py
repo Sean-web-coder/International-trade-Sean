@@ -79,7 +79,7 @@ def status():
                 "storage": "postgres" if os.getenv('DATABASE_URL') else "temporary"}
     with closing(db()) as conn:
         row = conn.execute('SELECT seen FROM worker_status WHERE id=1').fetchone()
-    return {"mode": "local", "worker_online": bool(row and time.time() - row[0] < 30),
+    return {"mode": "local", "worker_online": bool(row and time.time() - row['seen'] < 30),
             "storage": "postgres" if os.getenv('DATABASE_URL') else "temporary"}
 
 
@@ -108,7 +108,7 @@ def create_job(request: JobRequest):
             if not record:
                 raise HTTPException(404, '请先选择已背调客户')
             payload['prospect'] = storage.approved_research(conn, record['id'])
-        if conn.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0] >= 20:
+        if conn.execute("SELECT COUNT(*) AS pending_count FROM jobs WHERE state IN ('queued','running')").fetchone()['pending_count'] >= 20:
             raise HTTPException(429, '待处理任务过多，请等待或取消旧任务')
         jid = secrets.token_hex(16)
         conn.execute('INSERT INTO jobs (id,kind,payload,state,created) VALUES (?,?,?,?,?)',
