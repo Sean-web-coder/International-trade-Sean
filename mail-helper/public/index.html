@@ -1,0 +1,7 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>外贸开发信小助手</title><link rel="stylesheet" href="/style.css"></head><body>
+<header><h1>外贸开发信小助手</h1><nav><a href="/">客户首页</a><a href="/settings.html">邮箱设置</a></nav></header>
+<main><p class="notice">本阶段是本机骨架。生成开发信与开始发送将在下一阶段开放；当前不会发送邮件。</p>
+<section class="stats" aria-label="监控概览"><div><strong id="total">—</strong><span>客户总数</span></div><div><strong id="pending">—</strong><span>待发送</span></div><div><strong id="sent">—</strong><span>已发送</span></div><div><strong id="replied">—</strong><span>已回复</span></div><div><strong id="bounced">—</strong><span>已退信</span></div></section>
+<section><div class="row"><h2>客户列表</h2><small id="updated"></small></div><div class="tablewrap"><table><thead><tr><th>公司</th><th>联系人</th><th>邮箱</th><th>状态</th><th>备注</th></tr></thead><tbody id="customers"></tbody></table></div></section>
+<section><h2>导入 CSV</h2><p>表头：<code>公司名,联系人,邮箱,备注</code>。仅导入已获你批准的客户；重复的公司＋邮箱会跳过。演示记录不计入客户总数。</p><div class="row"><input id="csv" type="file" accept=".csv,text/csv"><button id="import">导入客户</button></div><p id="importResult" role="status"></p></section>
+<section><h2>下一阶段功能</h2><div class="row"><button disabled title="下一阶段开放">生成开发信（下一阶段开放）</button><button disabled title="下一阶段开放">开始发送（下一阶段开放）</button></div></section></main><script src="/app.js"></script></body></html>

@@ -1,0 +1,1 @@
+{"name":"foreign-trade-mail-helper","version":"0.1.0","private":true,"scripts":{"start":"node server.js","test":"node --test"},"dependencies":{"better-sqlite3":"^12.4.1","csv-parse":"^6.1.0","express":"^5.1.0","imapflow":"^1.0.195","mailparser":"^3.9.0","nodemailer":"^7.0.10"}}
